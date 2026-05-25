@@ -1,0 +1,739 @@
+---
+title: "nycviral"
+author: "Kiley Rubey"
+date: "2026-03-14"
+output:
+  html_document: default
+  pdf_document: default
+  always_allow_html: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#HIV viral suppression and historical redlining in NYC project
+#Kiley Rubey
+
+#Everything should run if you have the folder with the 3 datasets, sessioninfo() for package information is in the bottom of the html
+
+# data cleaning
+library(tidyverse)
+library(dplyr)
+library(janitor)
+#edit this
+setwd("~/Desktop/research proposal/HIV-HR-KileyRubey")
+nyc = read_csv("nyc zipcode viral suppression data.csv", skip=3)
+nrow(nyc)
+
+nyc = nyc %>%
+  clean_names() %>% 
+mutate(across(where(is.numeric), ~na_if(., -1))) %>%
+  mutate(across(where(is.numeric), ~na_if(., -8)))
+
+#exclude those with less than 5 cases
+nyc = nyc %>%
+  filter(zip_code_cases >= 5)
+
+nrow(nyc)
+View(nyc)
+```
+
+```{r}
+#subsets with NAs
+#UHF zip to borough subset 
+nyc = nyc %>%
+  mutate(
+    borough = case_when(
+      # Bronx: UHF Codes 101-107 
+      zip_code %in% c(10463, 10471, 10466, 10469, 10470, 10475, 10458, 10467, 10468, 10461, 10462, 10464, 10465, 10472, 10473, 10453, 10457, 10460, 10451, 10452, 10456, 10454, 10455, 10459, 10474) ~ "Bronx",
+      
+      # Brooklyn: UHF Codes 201-211 
+      zip_code %in% c(11211, 11222, 11201, 11205, 11215, 11217, 11231, 11213, 11212, 11216, 11233, 11238, 11207, 11208, 11220, 11232, 11204, 11218, 11219, 11230, 11203, 11210, 11225, 11226, 11234, 11236, 11239, 11209, 11214, 11228, 11223, 11224, 11229, 11235, 11206, 11221, 11237) ~ "Brooklyn",
+      
+      # Manhattan: UHF Codes 301-310 
+      zip_code %in% c(10031, 10032, 10033, 10034, 10040, 10026, 10027, 10030, 10037, 10039, 10029, 10035, 10023, 10024, 10025, 10021, 10028, 10044, 10128, 10001, 10011, 10018, 10019, 10020, 10036, 10010, 10016, 10017, 10022, 10012, 10013, 10014, 10002, 10003, 10009, 10004, 10005, 10006, 10007, 10038, 10280) ~ "Manhattan",
+      
+      # Queens: UHF Codes 401-410 
+      zip_code %in% c(11101, 11102, 11103, 11104, 11105, 11106, 11368, 11369, 11370, 11372, 11373, 11377, 11378, 11354, 11355, 11356, 11357, 11358, 11359, 11360, 11361, 11362, 11363, 11364, 11374, 11375, 11379, 11385, 11365, 11366, 11367, 11414, 11415, 11416, 11417, 11418, 11419, 11420, 11421, 11412, 11423, 11432, 11433, 11434, 11435, 11436, 11004, 11005, 11411, 11413, 11422, 11426, 11427, 11428, 11429, 11691, 11692, 11693, 11694, 11695, 11697) ~ "Queens",
+      
+      # Staten Island: UHF Codes 501-504 
+      zip_code %in% c(10302, 10303, 10310, 10301, 10304, 10305, 10314, 10306, 10307, 10308, 10309, 10312) ~ "Staten Island",
+      TRUE ~ "Other/Unknown"
+    )
+  )
+
+borough_subset = nyc %>%
+  select(
+    zip_code, 
+    borough, 
+    zip_code_percent, 
+    zip_code_cases
+  )
+#View(borough_subset)
+
+```
+
+Zip code geometries
+
+```{r}
+library(tidycensus)
+library(sf)
+#kaggle
+nyc_zip_geo = st_read("nyc-zip-code-tabulation-areas-polygons.geojson")
+
+#holc
+holc = st_read("mappinginequality.json")
+nyc_holc = holc %>%
+  mutate(city = as.character(city)) %>% 
+  filter(city %in% c("Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island"))
+```
+
+```{r}
+#connecting aidsvu zips to json zips
+nyc_zip_char = nyc %>% 
+  mutate(zip_code = as.character(zip_code))
+
+nyc_zip_map = nyc_zip_geo %>%
+  left_join(nyc_zip_char, by = c("postalCode" = "zip_code"))
+nyc_zip_map = st_make_valid(nyc_zip_map)
+nyc_holc = st_make_valid(nyc_holc)
+
+intersections = st_intersection(nyc_zip_map, nyc_holc) %>%
+  mutate(overlap_area = st_area(.)) 
+
+```
+
+**Data Analysis**
+
+Descriptive stats
+
+```{r}
+
+# pick the dominant grade for each zip
+dominant_zip_grades = intersections %>%
+  st_drop_geometry() %>%
+  group_by(postalCode) %>% 
+  slice_max(order_by = overlap_area, n = 1, with_ties = FALSE) %>%
+  select(postalCode, holc_grade = grade)
+
+# Build and Clean the Analysis Table
+analysis_table = nyc_zip_char %>%
+  left_join(dominant_zip_grades, by = c("zip_code" = "postalCode")) %>%
+  mutate(
+    zip_code_percent = as.numeric(zip_code_percent),
+    zip_code_cases= as.numeric(zip_code_cases),
+    holc_grade = factor(holc_grade, levels = c("A", "B", "C", "D")),
+    outcome_binary = if_else(zip_code_percent >= 67, 1, 0),
+    suppression_status = if_else(zip_code_percent >= 67, "Above", "Below"),
+    log_prevalence = log(zip_code_cases + 1)
+  ) %>%
+  filter(zip_code_cases >= 5, zip_code_percent != -1)
+nrow(analysis_table)
+# Join to the Map for plotting
+
+nyc_zip_map = nyc_zip_map %>%
+  select(postalCode, geometry) %>%
+  left_join(analysis_table, by = c("postalCode" = "zip_code"))
+
+analysis_table = analysis_table %>%
+  mutate(holc_grouped = case_when(
+    holc_grade %in% c("A", "B") ~ "Favored (A/B)",
+    holc_grade == "C" ~ "Declining (C)",
+    holc_grade == "D" ~ "Hazardous (D)"
+  )) %>%
+  mutate(holc_grouped = factor(holc_grouped, levels = c("Favored (A/B)", "Declining (C)", "Hazardous (D)"))) %>% 
+  mutate(
+    poc_cases = black_cases + hispanic_cases,
+    poc_percent = (poc_cases / zip_code_cases) * 100 )
+
+nrow(analysis_table)
+```
+
+```{r}
+# Count how many zip codes lack a historical grade
+sum(is.na(analysis_table$holc_grade))
+175-34
+```
+
+```{r}
+#table 1
+library(gtsummary)
+library(gt)
+theme_gtsummary_compact()
+
+table1= analysis_table %>%
+  select(holc_grouped, zip_code_percent, zip_code_cases) %>%
+  tbl_summary(
+    by = holc_grouped,
+    label = list(
+      zip_code_percent ~ "Viral Suppression Rate (%)",
+      zip_code_cases ~ "Total HIV Case Count"
+    ),
+    statistic = list(
+      all_continuous() ~ "{median} ({min} – {max})"
+    ),
+    digits = all_continuous() ~ 1
+  ) %>%
+  modify_header(label = "**Variable**") %>%
+  add_overall(last = FALSE, col_label = "**Total NYC (N={N})**") %>%
+  as_gt() %>%
+  tab_header(
+    title = md("**Table 1: Viral Suppression by Historical HOLC Grade**")
+  )
+
+table1
+```
+
+```{r}
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+
+plot_data = analysis_table %>%
+  select(holc_grouped, white_percent, poc_percent) %>%
+  pivot_longer(cols = c(white_percent, poc_percent), 
+               names_to = "RaceGroup", 
+               values_to = "SuppressionRate") %>%
+  mutate(RaceGroup = case_when(
+    RaceGroup == "white_percent" ~ "White",
+    RaceGroup == "poc_percent" ~ "Black + Hispanic",
+    TRUE ~ RaceGroup
+  ))
+
+#boxplot
+ggplot(plot_data, aes(x = holc_grouped, y = SuppressionRate, fill = RaceGroup)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) + 
+  geom_jitter(aes(color = RaceGroup), position = position_jitterdodge(), alpha = 0.4) + 
+  scale_fill_manual(values = c("#011E42", "#999999")) +
+  scale_color_manual(values = c("#011E42", "#999999")) +
+  labs(
+    title = "Viral Suppression Rates by Race and HOLC Grade",
+    x = "HOLC Neighborhood Grade",
+    y = "Viral Suppression Rate (%)",
+    fill = "Group",
+    color = "Group"
+  ) +
+  theme_minimal()
+
+
+```
+
+Comparison analysis
+
+```{r}
+
+#ANOVA: comparing holc grades
+anova_results = aov(zip_code_percent ~ holc_grouped, data = analysis_table)
+summary(anova_results)
+#"A vs. B," "A vs. C," "A vs. D," "B vs. C," etc.
+TukeyHSD(anova_results)
+
+library(ggplot2)
+
+```
+
+```{r}
+#logistic regression
+
+#use firth for small n
+library(logistf)
+
+firth_model = logistf(outcome_binary ~ holc_grouped, data = analysis_table)
+summary(firth_model)
+
+#with race covariate
+firth_cov = logistf(outcome_binary ~ holc_grouped + log_prevalence, data = analysis_table)
+summary(firth_cov)
+
+#table 2
+library(gt)
+library(gtsummary)
+theme_gtsummary_compact()
+firth_model$data = analysis_table
+table_crude = firth_model %>%
+  tbl_regression(
+    exponentiate = TRUE, 
+    data = analysis_table,
+    label = list(holc_grouped ~ "Historical HOLC Grade"),
+    tidy_fun = broom.helpers::tidy_parameters
+  ) %>%  
+    modify_header(
+    label = "**Variable**",
+    estimate = "**OR**"
+  ) %>%
+  bold_p(t = 0.05)
+
+
+firth_cov$data = analysis_table
+table_adjusted = firth_cov %>%
+  tbl_regression(
+    exponentiate = TRUE, 
+    data = analysis_table,
+    label = list(
+      holc_grouped ~ "Historical HOLC Grade",
+      log_prevalence ~ "Log HIV Prevalence"
+    ),
+    tidy_fun = broom.helpers::tidy_parameters
+  ) %>%
+  modify_header(
+    label = "**Variable**",
+    estimate = "**OR**"
+  ) %>%
+  bold_p(t = 0.05)
+
+
+table2 = tbl_merge(
+    tbls = list(table_crude, table_adjusted),
+    tab_spanner = c("**Model 1: Crude**", "**Model 2: Adjusted**")
+  ) %>%
+  as_gt() %>%
+  tab_header(
+    title = md("**Table 2: Predictors of Viral Suppression by Historical HOLC Grade**"),
+    subtitle = "Firth Logistic Regression Results (N=141)"
+  )
+table2
+```
+
+```{r}
+#diagnostics
+
+#deviance residuals plot
+p = as.numeric(predict(firth_cov, type = "response"))
+
+y = firth_cov$y 
+
+eps = 1e-10
+p_adj = pmin(pmax(p, eps), 1 - eps)
+
+resids = sqrt(-2 * (y * log(p_adj) + (1 - y) * log(1 - p_adj)))
+dev_residuals = ifelse(y == 1, resids, -resids)
+
+
+plot(p, dev_residuals, 
+     main = "Residuals vs. Fitted (Probabilities)", 
+     xlab = "Predicted Probability of Suppression Success",
+     ylab = "Deviance Residuals", 
+     pch = 19, col = "darkblue")
+abline(h = c(-2.5, 2.5), col = "red", lty = 2)
+
+library(pROC)
+rows_used = as.numeric(rownames(firth_cov$model))
+actual_outcomes = analysis_table$outcome_binary[rows_used]
+
+preds = predict(firth_cov, type = "response")
+
+roc_obj = roc(actual_outcomes, preds)
+
+plot(roc_obj, col = "#011E42", lwd = 4, main = "ROC Curve")
+text(0.5, 0.4, paste("AUC =", round(auc(roc_obj), 3)), cex = 1.2)
+
+library(car)
+vif_check = glm(outcome_binary ~ holc_grouped + log_prevalence, family = binomial, data = analysis_table)
+#vif(vif_check)
+
+# Do excluded Zips have higher/lower suppression?
+# analysis_table %>%
+#   mutate(missing_holc = is.na(holc_grade)) %>%
+#   group_by(missing_holc) %>%
+#   summarise(mean_suppression = mean(zip_code_percent, na.rm = TRUE))
+```
+
+```{r}
+
+library(ggplot2)
+
+#firth visualizations
+crude_results = data.frame(
+  term = c("Declining (C)", "Redlined (D)"),
+  estimate = exp(coef(firth_model)[2:3]),
+  lower = exp(firth_model$ci.lower[2:3]),
+  upper = exp(firth_model$ci.upper[2:3])
+)
+
+crude_results =rbind(
+  data.frame(term = "Favored (A/B) [Ref]", estimate = 1, lower = 1, upper = 1), crude_results
+)
+crude_results$term =factor(crude_results$term, levels = c("Redlined (D)", "Declining (C)", "Favored (A/B) [Ref]"))
+
+ggplot(crude_results, aes(x = estimate, y = term)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red", size = 1) + 
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.15, color = "#2c3e50", size = 0.8) +
+  geom_point(size = 5, color = "#00B9B3") + 
+  scale_x_log10(breaks = c(0.1, 0.2, 0.5, 1, 2), limits = c(0.03, 2.5)) +
+  labs(
+    title = "Odds of Meeting 67% Viral Suppression Benchmark",
+    subtitle = "Crude Odds Ratios with 95% Confidence Intervals",
+    x = "Odds Ratio (Log Scale)",
+    y = ""
+  ) +
+  theme_minimal(base_family = "Calibri") +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.text.y = element_text(face = "bold", size = 11),
+    plot.title = element_text(face = "bold")
+  )
+#full model
+#extract coefficients
+
+fmodel_results = data.frame(
+  term = c("Declining (C)", "Redlined (D)", "Log Prevalence"),
+  estimate = unname(exp(coef(firth_cov)[2:4])),
+  lower = unname(exp(firth_cov$ci.lower[2:4])),
+  upper = unname(exp(firth_cov$ci.upper[2:4]))
+)
+
+fmodel_results = rbind(
+  data.frame(term = "Favored (A/B) [Ref]", estimate = 1, lower = 1, upper = 1), 
+  fmodel_results
+)
+
+fmodel_results$term = factor(fmodel_results$term, levels = c(
+  "Log Prevalence", 
+  "Redlined (D)", 
+  "Declining (C)", 
+  "Favored (A/B) [Ref]"
+))
+
+f_plot = ggplot(fmodel_results, aes(x = estimate, y = term)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "red", size = 0.8) +
+  geom_errorbarh(aes(xmin = lower, xmax = upper), height = 0.2, color = "gray30") +
+  geom_point(size = 4, color = "#011E42") +
+  scale_x_log10(breaks = c(0.1, 0.5, 1, 2, 5), labels = c("0.1", "0.5", "1.0", "2.0", "5.0")) +
+  labs(
+    title = "Odds of Meeting 67% Viral Suppression Benchmark",
+    subtitle = "Adjusted Odds Ratios with 95% Confidence Intervals",
+    x = "Odds Ratio (Log Scale)",
+    y = ""
+  ) +
+  theme_minimal(base_size = 24, base_family = "Calibri") +
+  theme(
+    axis.text.y = element_text(face = "bold"),
+    plot.title = element_text(face = "bold"),
+    plot.title.position = "plot",
+    plot.margin = margin(1, 1, 1, 1, "cm"),
+    panel.background = element_rect(fill = "transparent", color = NA),
+    plot.background = element_rect(fill = "transparent", color = NA),
+    legend.background = element_rect(fill = "transparent", color = NA),
+  )
+
+#make background color pink
+ggsave("Firth_Adj.png", plot =f_plot,scale=1.5, dpi = 300)
+```
+
+Making maps
+
+```{r}
+# strip map to just id and geometry
+nyc_zip_map = nyc_zip_map %>%
+  select(postalCode, geometry)
+
+# rejoin dominant grades
+nyc_zip_map = nyc_zip_map %>%
+  left_join(dominant_zip_grades %>% 
+  select(postalCode, holc_grade), 
+  by = "postalCode")
+
+# rejoin analysis data 
+nyc_zip_map = nyc_zip_map %>%
+  left_join(analysis_table %>% 
+  select(zip_code, outcome_binary, zip_code_percent, poc_percent, log_prevalence), by = c("postalCode" = "zip_code"))
+
+#Make the grade a factor for the map legend
+nyc_zip_map = nyc_zip_map %>%
+  mutate(holc_grade = factor(holc_grade, levels = c("A", "B", "C", "D")))
+
+#spatial analysis
+
+library(spdep)
+#fix 186 vs 123 zips
+resids = firth_cov$y - firth_cov$predict
+
+rows_used = as.numeric(rownames(firth_cov$model))
+zip_vector =analysis_table$zip_code[rows_used]
+model_links = data.frame(
+  match_id = as.character(zip_vector) %>% trimws(),
+  residual = as.numeric(resids)
+)
+final_spatial_df = nyc_zip_map %>%
+  mutate(match_id = as.character(postalCode) %>% trimws()) %>%
+  inner_join(model_links, by = "match_id")
+
+#coordinates and weights
+coords = st_coordinates(st_centroid(st_geometry(final_spatial_df)))[, 1:2]
+coords =matrix(as.numeric(coords), ncol = 2)
+lw_final = nb2listw(knn2nb(knearneigh(coords, k = 4)), style = "W")
+
+# Morans I 
+moran_result = moran.test(final_spatial_df$residual, lw_final)
+moran_result
+
+# Getis Ord
+nb_self = include.self(knn2nb(knearneigh(coords, k = 4)))
+lw_self = nb2listw(nb_self, style = "B")
+
+local_gi = localG(final_spatial_df$residual, lw_self)
+
+final_spatial_df$gi_z_score = as.numeric(local_gi)
+
+final_spatial_df$cluster_type = cut(final_spatial_df$gi_z_score,
+                                    breaks = c(-Inf, -1.96, 1.96, Inf),
+                                    labels = c("Under-Performing", "Not   Significant", "Over-Performing"))
+
+summary(final_spatial_df$gi_z_score)
+table(final_spatial_df$cluster_type)
+
+cold_spots_list = final_spatial_df %>%
+  filter(cluster_type == "Under-Performing") %>%
+  select(postalCode, gi_z_score) %>%
+  st_drop_geometry()
+
+cold_spots_list
+
+spot_plot = ggplot(data = final_spatial_df) +
+  geom_sf(aes(fill = cluster_type), color = "white", size = 0.1) +
+  scale_fill_manual(values = c("Under-Performing" = "red3", "Over-Performing" = "cornflowerblue", "Not Significant" = "grey80"),
+                    na.value = "grey80",
+                    name = "Cluster Type") +
+  theme_void(base_size = 20, base_family="Calibri") +
+  labs(title = "Significant Cluster Performance",
+       fill = "Cluster Type") +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.title = element_text(face = "bold"),
+    legend.position = "bottom",
+    plot.margin = margin(1, 1, 1, 1, "cm")
+  )
+
+ggsave("Spot_Plot.png", plot =spot_plot,scale=1.5, dpi = 300)
+```
+
+```{r}
+library(ggplot2)
+library(viridis)
+
+
+# Map of Historical HOLC Grades in NYC
+r_plot = ggplot(data = nyc_zip_map) +
+  geom_sf(aes(fill = holc_grade), color = "white", size = 0.1) +
+  scale_fill_manual(
+    values = c("A" = "#76a08a", "B" = "#7cb5bd", "C" = "#f3eb90", "D" = "#e15353"),
+    name = "HOLC Grade",
+    na.value = "grey80") +
+  theme_void(base_size = 20, base_family = "Calibri") +
+  labs(
+    title = "HOLC Grades by NYC ZIP Code"
+  )+
+    theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.title = element_text(face = "bold"),
+    plot.margin = margin(1, 1, 1, 1, "cm")
+  )
+
+
+
+ggsave("NYC_Redlining_Map.png", plot = r_plot, scale=1.5, dpi = 300)
+```
+
+```{r}
+# Map of 2023 Viral Suppression %
+ggplot(data = nyc_zip_map) +
+  geom_sf(aes(fill = zip_code_percent), color = "white", size = 0.1) +
+  scale_fill_distiller(
+    palette = "YlOrRd", 
+    direction = 1,
+    name = "Suppression %",
+    na.value = "grey90"
+  ) +
+  theme_void(base_size = 24, base_family = "Calibri") + 
+  labs(
+    title = "2023 HIV Viral Suppression by NYC ZIP Code"
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+#cateogrical variable
+s_plot = ggplot(data = nyc_zip_map) +
+  geom_sf(aes(fill = factor(outcome_binary)), color = "white", size = 0.1) +
+  scale_fill_manual(
+    values = c(
+      "1" = "#fca34e",
+      "0" = "#eb3f3f"
+    ),
+    na.value = "grey90",
+    name = "Suppression\nStatus",
+    labels = c(
+      "1" = "Above 67%", 
+      "0" = "Below 67%"
+    )
+  ) +
+  theme_void(base_size=20, base_family = "Calibri") + 
+  labs(
+    title = "2023 HIV Viral Suppression by NYC ZIP Code"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.title = element_text(face = "bold"),
+    plot.margin = margin(1, 1, 1, 1, "cm")
+  )
+
+ggsave("NYC_HIV_Map.png", plot = s_plot, scale=1.5, dpi = 300)
+```
+
+```{r}
+# Map of 2023 hispanic+black Viral Suppression %
+ggplot(data = nyc_zip_map) +
+  geom_sf(aes(fill = poc_percent), color = "white", size = 0.1) +
+  scale_fill_distiller(
+    palette = "YlOrRd", 
+    direction = 1,
+    name = "Suppression %",
+    na.value = "grey90"
+  ) +
+  theme_void() + 
+  labs(
+    title = "2023 Black+Hispanic Population HIV Viral Suppression by NYC Zip Code",
+    caption = "Source: AIDSVu 2023"
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+```
+
+```{r}
+library(ggpattern)
+
+
+#categorical
+c_plot = ggplot(data = nyc_zip_map) +
+  geom_sf(aes(fill = factor(outcome_binary)), color = "white", linewidth = 0.1) +
+  geom_sf_pattern(
+    data = filter(nyc_zip_map, holc_grade == "C"),
+    aes(pattern = "Grade C (Declining)"),
+    pattern_fill = "black",      
+    pattern_color = "black",
+    pattern_alpha = 0.6,
+    pattern_density = 0.1,       
+    pattern_spacing = 0.017,       
+    fill = NA, 
+    color = "black",              
+    linewidth = 0.3,
+    linetype = "solid"
+  ) +
+  
+  geom_sf_pattern(
+    data = filter(nyc_zip_map, holc_grade == "D"),
+    aes(pattern = "Grade D (Redlined)"),
+    pattern_fill = "black",      
+    pattern_color = "black",     
+    pattern_alpha = 0.6,
+    pattern_density = 0.1,       
+    pattern_spacing = 0.015,
+    pattern_angle = 45,          
+    fill = NA, 
+    color = "black",              
+    linewidth = 0.3,
+    linetype = "solid"
+  ) +
+  scale_pattern_manual(
+    values = c("Grade C (Declining)" = "circle", "Grade D (Redlined)" = "stripe"),
+    name = "HOLC Grade"
+  ) +
+  
+  scale_fill_manual(
+    values = c("1" = "#fab675", "0" = "#eb6c6c"),
+    na.value = "grey90",
+    name = "Suppression Status",
+    labels = c("1" = "Above 67%", "0" = "Below 67%")
+  ) +
+  
+  theme_void(base_size=16, base_family = "Calibri") + 
+  labs(
+    title = "2023 HIV Viral Suppression by NYC ZIP Code & HOLC Grade"
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical",
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.title = element_text(face = "bold"),
+    plot.margin = margin(1, 1, 1, 1, "cm")
+  )
+
+ggsave("NYC_HIV_Redlining_Map.png", plot = c_plot, scale=1.5, dpi = 300)
+
+```
+
+Leaflet
+
+```{r}
+library(leaflet)
+
+#interactive map with grades
+pal = colorBin("YlOrRd", domain = nyc_zip_map$zip_code_percent, bins = 5)
+
+leaflet(nyc_zip_map) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addPolygons(
+    fillColor = ~pal(zip_code_percent),
+    fillOpacity = 0.7, 
+    color = "white", 
+    weight = 1,
+    highlightOptions = highlightOptions(weight = 3, color = "#666", bringToFront = TRUE),
+    label = ~paste0("Zip Code: ", postalCode, " | Suppression: ", zip_code_percent, "% | HOLC Grade: ",holc_grade)
+  ) %>%
+  addLegend(pal = pal, values = ~zip_code_percent, title = "Viral Suppression %", position = "bottomright")
+```
+
+```{r}
+
+pal = colorBin("YlOrRd", domain = nyc_zip_map$zip_code_percent, bins = 5)
+
+holc_pal = colorFactor(
+  palette = c("#76a08a", "#7cb5bd", "#f3eb90", "#e15353"), 
+  domain = nyc_zip_map$holc_grade)
+
+layers_map = leaflet(nyc_zip_map) %>%
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  
+  addPolygons(
+    group = "Viral Suppression",
+    fillColor = ~pal(zip_code_percent),
+    fillOpacity = 0.7, 
+    color = "white", 
+    weight = 1,
+    highlightOptions = highlightOptions(weight = 3, color = "#666", bringToFront = TRUE),
+    label = ~paste0("Zip Code: ", postalCode, " | Suppression: ", round(zip_code_percent, 1), "%"," | HOLC Grade: ", holc_grade)
+  ) %>%
+  
+  addPolygons(
+    group = "HOLC Grades",
+    fillColor = ~holc_pal(holc_grade),
+    fillOpacity = 0.5, 
+    color = "white", 
+    weight = 1,
+    highlightOptions = highlightOptions(weight = 3, color = "#666", bringToFront = TRUE),
+    label = ~paste0("Zip Code: ", postalCode, " | Suppression: ", round(zip_code_percent, 1), "%"," | Grade: ", holc_grade)) %>%
+  addLegend(pal = pal, values = ~zip_code_percent, 
+            title = "Viral Suppression %", position = "bottomright") %>%
+  addLegend(pal = holc_pal, values = ~holc_grade, 
+            title = "HOLC Grade", position = "bottomleft") %>%
+  
+  addLayersControl(
+    overlayGroups = c("Viral Suppression", "HOLC Grades"),
+    options = layersControlOptions(collapsed = FALSE)
+  )
+layers_map
+```
+
+```{r}
+#packages used
+
+sessionInfo()
+```
